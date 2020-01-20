@@ -15,13 +15,9 @@
   #define CONFIG_VERSION     "PT03"
   #define CONFIG_START       0
 
-  struct Settings {
-    char version[5] = CONFIG_VERSION;
-    char wifi_sta_ssid[33] = "fifina";
-    char wifi_sta_pass[65] = "seatec-astronomy";
-    char ntp_server[256] = "tik.cesnet.cz";
-    int tz_offset = 60; // timezone offset from UTC in minutes
-    byte debug = 1;
-  };
+  #define DEFAULT_SSID       "fifina"
+  #define DEFAULT_PASS       "seatec-astronomy"
+  #define DEFAULT_NTP_SERVER "tik.cesnet.cz"
+  #define DEFAULT_TZ_OFFSET  60
   
 #endif

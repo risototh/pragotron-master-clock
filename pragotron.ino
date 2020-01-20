@@ -4,27 +4,15 @@
 #include <RTClib.h>
 #include <EEPROM.h>
 #include "config.h"
-
-/** console commands:
- *  HELP
- *  CLOCK <hhmm>    - nastav momentalne zobrazeny udaj na "displeji"
- *  TZ <offset>     - nastav offset v minutach od UTC   
- *  SSID <ssid>     - nastav nove SSID na WiFi
- *  PASS <password> - nastav nove heslo na WiFi
- *  NTP <fqdn>      - NTP server FQDN
- *  DEBUG (on|off)  - zapni/vypni debug
- *  STORE           - uloz nastavenia
- *  CONFIG          - zobraz nastavenia
- *  STATUS          - zobraz stav
- *  RESTART         - restart
- */
+#include "storage.h"
+#include "cli.h"
+#include "cli_commands.h"
 
 byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
-bool debug = true;
-bool output_polarity = 0;
-Settings systemSettings;
-
-// A UDP instance to let us send and receive packets over UDP
+long prevHandledTime = 0;
+EEPROMSettings systemSettings;
+NVRAMState systemState;
+CLI cli;
 WiFiUDP udp;
 RTC_DS3231 rtc;
 
@@ -34,6 +22,7 @@ void setup() {
   CONSOLE.println("PRAGOTRON NTP Master Clock\nby risototh\n");
   CONSOLE.println("Init start");
 
+  initCLI();
   initSettings();
   initIO();
   initRTC();
@@ -44,9 +33,32 @@ void setup() {
 }
 
 void loop() {
-  ntpQuery();
-  // wait ten seconds before asking for the time again
-  delay(10000);
+  long m = millis() / 1000;
+
+  cli.handle();
+
+  if (m % 10 == 0 && prevHandledTime != m) { // every 10 seconds
+    if (m % 60 == 0) {
+      ntpQuery();
+    }
+  
+    if (systemSettings.debug) {
+      CONSOLE.print("RTC: local time = ");  
+      printDateTime(rtc.now());
+      CONSOLE.println();
+    }
+    
+    prevHandledTime = m;
+  }
+  
+  delay(50);
+}
+
+void initCLI() {
+  CONSOLE.println("- CLI");
+  cli.setCommands(cli_commands, sizeof(cli_commands) / sizeof(cliCommandItem));
+  CONSOLE.println("  > available commands:");
+  cli.printCommandList("    ");
 }
 
 void initSettings() {
@@ -104,6 +116,8 @@ void printDateTime(DateTime now) {
 }
 
 void ntpQuery() {
+  if (WiFi.status() != WL_CONNECTED) return; // skip when not connected
+  
   digitalWrite(PIN_LED_STATUS, HIGH);
 
   IPAddress timeServerIP; // NTP server address - will be resolved from systemSettings.ntp_server
@@ -114,6 +128,8 @@ void ntpQuery() {
 
   // sync RTC
   if (unixTime > SECONDS_FROM_1970_TO_2000) { // valid time, year > 2000 :D
+    systemState.lastSync = unixTime;
+    storeState(systemState);
     DateTime dt = DateTime(unixTime);
     dt = dt + TimeSpan(systemSettings.tz_offset * 60);
     rtc.adjust(dt);
@@ -203,15 +219,14 @@ bool wifiConnect() {
   long timeoutStart = millis();
   while (WiFi.status() != WL_CONNECTED) {
     if (millis() - timeoutStart > CONNECTION_TIMEOUT) {
-      CONSOLE.println("  > failed");
+      CONSOLE.println("\n  > failed");
       return false;
     }
     delay(100);
     CONSOLE.print(".");
   }
-  CONSOLE.println();
 
-  CONSOLE.print("  > connected to "); CONSOLE.println(systemSettings.wifi_sta_ssid);
+  CONSOLE.print("\n  > connected to "); CONSOLE.println(systemSettings.wifi_sta_ssid);
   digitalWrite(LED_BUILTIN, LOW); // turn LED on
   //if (systemSettings.debug) WiFi.printDiag(CONSOLE);
   
@@ -245,49 +260,6 @@ void ntpSend(IPAddress& address) {
   udp.endPacket();
 }
 
-struct Settings loadSettings() {
-  Settings settings; 
-
-  EEPROM.begin(sizeof(Settings));
-  EEPROM.get(CONFIG_START, settings);
-  
-  if (strcmp(settings.version, CONFIG_VERSION) == 0) {
-    CONSOLE.print("  > loaded settings data: ");
-    printSettingRaw(settings);
-    CONSOLE.println();
-    EEPROM.end();
-    return settings;
-  }
-
-  // settings not found, so try to write the defaults
-  Settings newSettings;
-  CONSOLE.println("  > not found");
-  CONSOLE.println("  > writing default data");
-  storeSettings(newSettings); // defaults are defined in the structure definition
-  return newSettings;
-}
-
-void storeSettings(struct Settings settingsIn) {
-  noInterrupts();
-  struct Settings settings = settingsIn;
-  interrupts();
-
-  EEPROM.begin(sizeof(Settings));
-  EEPROM.put(CONFIG_START, settings);
-  EEPROM.end();
-  
-  CONSOLE.print("  > stored settings data: ");
-  printSettingRaw(settings);
-  CONSOLE.println();
-}
-
-void printSettingRaw(struct Settings settings) {
-  for (unsigned int t = 0; t < sizeof(Settings); t++) {
-    CONSOLE.print((char)(*((char*)&settings + t)), HEX); // TODO: fix values < 0x10
-    CONSOLE.print(" ");
-  }
-}
-
 void pulse_ll(bool polarity) {
   if (polarity) {
     digitalWrite(PIN_PULSE_1, HIGH);
@@ -304,11 +276,12 @@ void pulse() {
   digitalWrite(PIN_LED_STATUS, HIGH);
   // repeat the previous pulse, just for case, that someone tamperred with the manual setting
   // TODO: review this in the future
-  pulse_ll(!output_polarity);
+  pulse_ll(!systemState.drivePolarity);
   delay(100);
   // make new pulse of required polarity
-  pulse_ll(output_polarity);
+  pulse_ll(systemState.drivePolarity);
   
   digitalWrite(PIN_LED_STATUS, LOW);
-  output_polarity = !output_polarity;
+  systemState.drivePolarity = !systemState.drivePolarity;
+  storeState(systemState);
 }
